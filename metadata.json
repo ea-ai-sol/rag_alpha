@@ -1,0 +1,6 @@
+{
+  "name": "Local RAG Dashboard",
+  "description": "A simple RAG workflow tool with local vector database, text chunking, and Gemini AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
