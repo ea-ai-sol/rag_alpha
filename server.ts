@@ -21,6 +21,20 @@ if (!fs.existsSync('uploads')) {
   fs.mkdirSync('uploads');
 }
 
+// Track documents separately for better metadata
+const DOCS_DB_PATH = './documents_db.json';
+let documentsInfo: any[] = [];
+if (fs.existsSync(DOCS_DB_PATH)) {
+  documentsInfo = JSON.parse(fs.readFileSync(DOCS_DB_PATH, 'utf-8'));
+}
+
+function saveDocumentsInfo() {
+  fs.writeFileSync(DOCS_DB_PATH, JSON.stringify(documentsInfo, null, 2));
+}
+
+// Global flag to track deleted documents and stop their background jobs
+const deletedDocIds = new Set<string>();
+
 // API Routes
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -28,34 +42,76 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const { originalname, path: filePath } = req.file;
+    const { originalname, path: filePath, size } = req.file;
     const text = fs.readFileSync(filePath, 'utf-8');
     
     // Clean up uploaded file
     fs.unlinkSync(filePath);
 
-    // 1. Chunk the text
-    const chunks = chunkText(text, 1000, 200);
+    // 1. Chunk the text with larger chunks to make fewer API calls (Free tier rate limit friendly)
+    const chunks = chunkText(text, 5000, 1000);
 
-    // 2. Embed each chunk
+    // 2. Embed each chunk (Background processing)
     const docId = uuidv4();
     const documentName = originalname;
     
-    for (const chunk of chunks) {
-      const embedding = await generateEmbedding(chunk);
-      vectorStore.add({
-        id: uuidv4(),
-        docId,
-        text: chunk,
-        embedding,
-        metadata: {
-          documentName,
-          timestamp: new Date().toISOString()
+    documentsInfo.push({
+      id: docId,
+      name: documentName,
+      size,
+      totalChunks: chunks.length,
+      processedChunks: 0,
+      status: 'processing',
+      timestamp: new Date().toISOString()
+    });
+    saveDocumentsInfo();
+    
+    res.json({ success: true, message: `Started processing ${chunks.length} chunks from ${documentName} in the background.` });
+    
+    // Process in background asynchronously
+    (async () => {
+      let processed = 0;
+      for (const chunk of chunks) {
+        if (deletedDocIds.has(docId)) {
+          console.log(`Document ${docId} was deleted, stopping background processing.`);
+          break;
         }
-      });
-    }
 
-    res.json({ success: true, message: `Processed and embedded ${chunks.length} chunks from ${documentName}` });
+        try {
+          const embedding = await generateEmbedding(chunk);
+          vectorStore.add({
+            id: uuidv4(),
+            docId,
+            text: chunk,
+            embedding,
+            metadata: {
+              documentName,
+              timestamp: new Date().toISOString()
+            }
+          });
+          processed++;
+          
+          // Update progress
+          const doc = documentsInfo.find(d => d.id === docId);
+          if (doc) {
+            doc.processedChunks = processed;
+            saveDocumentsInfo();
+          }
+          
+          // Free tier allows ~15 requests per minute, so we wait ~4.5 seconds between requests
+          await new Promise(resolve => setTimeout(resolve, 4500));
+        } catch (err) {
+          console.error(`Error processing chunk for ${documentName}:`, err);
+        }
+      }
+      
+      const doc = documentsInfo.find(d => d.id === docId);
+      if (doc && !deletedDocIds.has(docId)) {
+        doc.status = 'completed';
+        saveDocumentsInfo();
+        console.log(`Finished processing ${processed}/${chunks.length} chunks for ${documentName}`);
+      }
+    })();
   } catch (error: any) {
     console.error('Upload error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -100,34 +156,23 @@ app.post('/api/query', async (req, res) => {
 });
 
 app.get('/api/documents', (req, res) => {
-  // Aggregate chunks to list unique documents
-  const items = vectorStore.getAll();
-  const docsMap = new Map();
-  
-  items.forEach(item => {
-    if (!docsMap.has(item.docId)) {
-      docsMap.set(item.docId, {
-        id: item.docId,
-        name: item.metadata?.documentName || 'Unknown',
-        chunkCount: 1,
-        timestamp: item.metadata?.timestamp
-      });
-    } else {
-      docsMap.get(item.docId).chunkCount++;
-    }
-  });
-
-  const docsList = Array.from(docsMap.values()).sort((a, b) => 
-    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-  );
-
-  res.json({ documents: docsList });
+  res.json({ documents: documentsInfo.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()) });
 });
 
 app.delete('/api/documents/:docId', (req, res) => {
   try {
     const { docId } = req.params;
+    
+    // Mark as deleted for background job
+    deletedDocIds.add(docId);
+    
+    // Remove from documents database
+    documentsInfo = documentsInfo.filter(d => d.id !== docId);
+    saveDocumentsInfo();
+    
+    // Remove from vector store
     const deletedCount = vectorStore.deleteByDocId(docId);
+    
     res.json({ success: true, message: `Deleted ${deletedCount} chunks.` });
   } catch (error: any) {
     console.error('Delete error:', error);

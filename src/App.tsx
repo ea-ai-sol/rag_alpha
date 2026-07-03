@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, Send, Loader2, Trash2, Database, MessageSquare, Plus } from 'lucide-react';
+import { Upload, FileText, Send, Loader2, Trash2, Database, MessageSquare, Plus, CheckCircle2 } from 'lucide-react';
 
 interface Document {
   id: string;
   name: string;
-  chunkCount: number;
+  size: number;
+  totalChunks: number;
+  processedChunks: number;
+  status: 'processing' | 'completed';
   timestamp: string;
 }
 
@@ -12,6 +15,14 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: any[];
+}
+
+function formatBytes(bytes: number) {
+  if (!bytes) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 export default function App() {
@@ -26,6 +37,10 @@ export default function App() {
 
   useEffect(() => {
     fetchDocuments();
+    
+    // Poll for document updates every 3 seconds to show background processing progress
+    const interval = setInterval(fetchDocuments, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -58,7 +73,15 @@ export default function App() {
         body: formData,
       });
       
-      const data = await res.json();
+      let data;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        throw new Error(`Server returned a non-JSON response (Status ${res.status}): ${text.substring(0, 100)}...`);
+      }
+      
       if (data.success) {
         await fetchDocuments();
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -122,33 +145,37 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans flex flex-col">
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 font-sans flex flex-col selection:bg-indigo-100 selection:text-indigo-900">
       {/* Header */}
-      <header className="bg-white border-b border-neutral-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
-        <div className="flex items-center gap-2">
-          <Database className="w-6 h-6 text-indigo-600" />
-          <h1 className="text-xl font-semibold tracking-tight">Local RAG Workspace</h1>
-        </div>
-        <div className="text-sm text-neutral-500 font-medium">
-          Powered by Gemini AI
+      <header className="bg-white/80 backdrop-blur-md border-b border-zinc-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-600 p-2 rounded-lg shadow-sm">
+            <Database className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-[17px] font-semibold tracking-tight text-zinc-900 leading-tight">Local RAG Workspace</h1>
+          </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden max-w-7xl w-full mx-auto">
+      <main className="flex-1 flex overflow-hidden max-w-[1400px] w-full mx-auto">
         
         {/* Left Sidebar - Documents */}
-        <div className="w-80 flex flex-col bg-white border-r border-neutral-200 h-[calc(100vh-65px)]">
-          <div className="p-4 border-b border-neutral-200">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-500 mb-4">Knowledge Base</h2>
+        <div className="w-80 flex flex-col bg-zinc-50/50 border-r border-zinc-200 h-[calc(100vh-73px)]">
+          <div className="p-5 border-b border-zinc-200/60 bg-white/30">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-zinc-500 mb-4 flex items-center justify-between">
+              Knowledge Base
+              <span className="bg-zinc-200 text-zinc-600 px-2 py-0.5 rounded-full text-[10px]">{documents.length}</span>
+            </h2>
             
             <button 
               onClick={() => fileInputRef.current?.click()}
               disabled={isUploading}
-              className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 px-4 rounded-md font-medium transition-colors disabled:opacity-70"
+              className="w-full flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white py-2.5 px-4 rounded-xl font-medium text-sm transition-all active:scale-[0.98] disabled:opacity-70 disabled:active:scale-100 shadow-sm"
             >
               {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              {isUploading ? 'Indexing...' : 'Upload Document'}
+              {isUploading ? 'Uploading...' : 'Upload Document'}
             </button>
             <input 
               type="file" 
@@ -157,27 +184,43 @@ export default function App() {
               accept=".txt,.md,.csv" 
               className="hidden" 
             />
-            <p className="text-xs text-neutral-400 mt-2 text-center">Supports .txt, .md, .csv</p>
+            <p className="text-[11px] text-zinc-400 mt-3 text-center">Supports plain text files (.txt, .md, .csv)</p>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
             {documents.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center px-4 opacity-60">
-                <FileText className="w-8 h-8 mb-3 text-neutral-400" />
-                <p className="text-sm">No documents indexed yet. Upload a file to start.</p>
+              <div className="h-full flex flex-col items-center justify-center text-center px-4 opacity-70">
+                <div className="w-12 h-12 bg-white rounded-2xl shadow-sm border border-zinc-200 flex items-center justify-center mb-4">
+                  <FileText className="w-6 h-6 text-zinc-400" />
+                </div>
+                <p className="text-sm font-medium text-zinc-600">No documents yet</p>
+                <p className="text-xs text-zinc-400 mt-1">Upload a file to start indexing</p>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2.5">
                 {documents.map(doc => (
-                  <div key={doc.id} className="group relative bg-neutral-50 border border-neutral-200 rounded-lg p-3 hover:border-indigo-300 transition-colors">
+                  <div key={doc.id} className="group relative bg-white border border-zinc-200 rounded-xl p-3.5 hover:border-indigo-300 hover:shadow-sm transition-all duration-200">
                     <div className="flex items-start justify-between">
-                      <div className="flex-1 min-w-0 pr-6">
-                        <h3 className="text-sm font-medium text-neutral-800 truncate">{doc.name}</h3>
-                        <p className="text-xs text-neutral-500 mt-1">{doc.chunkCount} chunks • {new Date(doc.timestamp).toLocaleDateString()}</p>
+                      <div className="flex-1 min-w-0 pr-8">
+                        <h3 className="text-sm font-semibold text-zinc-800 truncate" title={doc.name}>{doc.name}</h3>
+                        <div className="flex items-center gap-2 mt-1.5">
+                          <span className="text-[11px] text-zinc-500 font-medium bg-zinc-100 px-1.5 py-0.5 rounded-md">{formatBytes(doc.size)}</span>
+                          {doc.status === 'processing' ? (
+                            <span className="text-[11px] text-amber-600 font-medium flex items-center gap-1 bg-amber-50 px-1.5 py-0.5 rounded-md border border-amber-100">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              {doc.processedChunks}/{doc.totalChunks} chunks
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-emerald-600 font-medium flex items-center gap-1 bg-emerald-50 px-1.5 py-0.5 rounded-md border border-emerald-100">
+                              <CheckCircle2 className="w-3 h-3" />
+                              Indexed
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <button 
                         onClick={() => handleDeleteDoc(doc.id)}
-                        className="absolute right-2 top-2 p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                        className="absolute right-3 top-3 p-1.5 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all duration-200"
                         title="Delete Document"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -188,88 +231,90 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Models Info */}
+          <div className="p-4 border-t border-zinc-200/60 bg-zinc-50 text-[11px] font-medium text-zinc-500">
+            <div className="flex flex-col gap-2.5">
+               <div className="flex items-center justify-between">
+                 <span className="uppercase tracking-wider text-[10px]">Embeddings</span>
+                 <span className="bg-white px-2 py-0.5 rounded border border-zinc-200 shadow-sm font-mono text-[10px] text-zinc-600">gemini-embedding-2</span>
+               </div>
+               <div className="flex items-center justify-between">
+                 <span className="uppercase tracking-wider text-[10px]">Chat</span>
+                 <span className="bg-white px-2 py-0.5 rounded border border-zinc-200 shadow-sm font-mono text-[10px] text-zinc-600">gemini-3.5-flash</span>
+               </div>
+            </div>
+          </div>
         </div>
 
         {/* Right Area - Chat/Query */}
-        <div className="flex-1 flex flex-col bg-neutral-50 h-[calc(100vh-65px)] relative">
+        <div className="flex-1 flex flex-col bg-white h-[calc(100vh-73px)] relative">
           {/* Chat Messages */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-8">
             {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center opacity-60 max-w-sm mx-auto">
-                <MessageSquare className="w-10 h-10 mb-4 text-indigo-500" />
-                <h3 className="text-lg font-medium text-neutral-800 mb-2">Ask your documents</h3>
-                <p className="text-sm text-neutral-500">
-                  Upload a text document on the left, then ask questions about its content here. The AI will find relevant sections and answer your query.
+              <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto animate-in fade-in zoom-in duration-500">
+                <div className="w-16 h-16 bg-indigo-50 rounded-3xl flex items-center justify-center mb-6 shadow-sm border border-indigo-100">
+                  <MessageSquare className="w-8 h-8 text-indigo-600" />
+                </div>
+                <h3 className="text-xl font-semibold text-zinc-900 mb-3">Chat with your knowledge base</h3>
+                <p className="text-[15px] text-zinc-500 leading-relaxed">
+                  Upload a document on the left, then ask questions about its content here. The AI will find relevant sections and answer your query using only the provided context.
                 </p>
               </div>
             ) : (
-              messages.map((msg, i) => (
-                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] rounded-2xl px-5 py-4 ${
-                    msg.role === 'user' 
-                      ? 'bg-indigo-600 text-white rounded-br-none shadow-sm' 
-                      : 'bg-white border border-neutral-200 text-neutral-800 rounded-bl-none shadow-sm'
-                  }`}>
-                    <div className="prose prose-sm max-w-none">
-                      {msg.content.split('\n').map((line, j) => (
-                        <p key={j} className={j > 0 ? 'mt-2' : ''}>{line}</p>
-                      ))}
-                    </div>
-                    
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div className="mt-4 pt-4 border-t border-neutral-100">
-                        <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-2">Sources Referenced</p>
-                        <div className="space-y-2">
-                          {msg.sources.map((source, j) => (
-                            <div key={j} className="bg-neutral-50 rounded p-2 text-xs border border-neutral-100">
-                              <span className="font-medium text-indigo-600 block mb-1">
-                                {source.documentName} <span className="text-neutral-400 font-normal">({(source.score * 100).toFixed(1)}% match)</span>
-                              </span>
-                              <span className="text-neutral-600 line-clamp-2 italic">"{source.text}"</span>
-                            </div>
-                          ))}
-                        </div>
+              <div className="max-w-3xl mx-auto space-y-8">
+                {messages.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} group animate-in slide-in-from-bottom-2 fade-in duration-300`}>
+                    <div className={`max-w-[85%] rounded-3xl px-6 py-4 ${
+                      msg.role === 'user' 
+                        ? 'bg-zinc-900 text-white rounded-br-sm shadow-sm' 
+                        : 'bg-zinc-50 border border-zinc-200 text-zinc-800 rounded-bl-sm shadow-sm'
+                    }`}>
+                      <div className="prose prose-sm max-w-none prose-p:leading-relaxed">
+                        {msg.content.split('\n').map((line, j) => (
+                          <p key={j} className={j > 0 ? 'mt-2' : ''}>{line}</p>
+                        ))}
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
-              ))
+                ))}
+              </div>
             )}
             
             {isQuerying && (
-              <div className="flex justify-start">
-                <div className="bg-white border border-neutral-200 text-neutral-800 rounded-2xl rounded-bl-none px-5 py-4 shadow-sm flex items-center gap-3">
-                  <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
-                  <span className="text-sm font-medium text-neutral-500">Analyzing documents...</span>
+              <div className="flex justify-start max-w-3xl mx-auto">
+                <div className="bg-zinc-50 border border-zinc-200 text-zinc-800 rounded-3xl rounded-bl-sm px-6 py-4 shadow-sm flex items-center gap-3 animate-pulse">
+                  <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+                  <span className="text-sm font-medium text-zinc-500">Searching documents and generating response...</span>
                 </div>
               </div>
             )}
-            <div ref={messagesEndRef} />
+            <div ref={messagesEndRef} className="h-4" />
           </div>
 
           {/* Input Area */}
-          <div className="p-4 bg-white border-t border-neutral-200">
-            <form onSubmit={handleQuery} className="max-w-3xl mx-auto relative flex items-end gap-2">
-              <div className="relative flex-1">
+          <div className="p-4 sm:p-6 bg-white border-t border-zinc-100">
+            <form onSubmit={handleQuery} className="max-w-3xl mx-auto relative flex items-end gap-3 group">
+              <div className="relative flex-1 bg-zinc-50 border border-zinc-200 rounded-3xl transition-all duration-200 focus-within:ring-4 focus-within:ring-indigo-50 focus-within:border-indigo-300 focus-within:bg-white shadow-sm">
                 <input
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={documents.length === 0 ? "Upload a document first..." : "Ask a question about your documents..."}
                   disabled={documents.length === 0 || isQuerying}
-                  className="w-full bg-neutral-100 border-none rounded-full py-3.5 pl-6 pr-12 text-sm focus:ring-2 focus:ring-indigo-600 focus:bg-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full bg-transparent border-none rounded-3xl py-4 pl-6 pr-14 text-[15px] outline-none disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-zinc-400"
                 />
+                <button
+                  type="submit"
+                  disabled={!query.trim() || documents.length === 0 || isQuerying}
+                  className="absolute right-2 bottom-2 p-2.5 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-2xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm disabled:hover:bg-indigo-600 active:scale-95"
+                >
+                  <Send className="w-4 h-4 ml-0.5" />
+                </button>
               </div>
-              <button
-                type="submit"
-                disabled={!query.trim() || documents.length === 0 || isQuerying}
-                className="absolute right-2 bottom-1.5 p-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Send className="w-4 h-4" />
-              </button>
             </form>
-            <div className="text-center mt-2 text-[10px] text-neutral-400">
-              AI can make mistakes. Verify information from the source documents.
+            <div className="text-center mt-3 text-[11px] font-medium text-zinc-400">
+              AI can make mistakes. Always verify information with the source documents.
             </div>
           </div>
         </div>
