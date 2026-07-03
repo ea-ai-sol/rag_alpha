@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, Send, Loader2, Trash2, Database, MessageSquare, Plus, CheckCircle2 } from 'lucide-react';
+import { Upload, FileText, Send, Loader2, Trash2, Database, MessageSquare, Plus, CheckCircle2, Clock } from 'lucide-react';
 
 interface Document {
   id: string;
@@ -15,6 +15,7 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: any[];
+  processingTime?: number;
 }
 
 function formatBytes(bytes: number) {
@@ -32,8 +33,20 @@ export default function App() {
   
   const [isUploading, setIsUploading] = useState(false);
   const [isQuerying, setIsQuerying] = useState(false);
+  const [queryTimer, setQueryTimer] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval>;
+    if (isQuerying) {
+      setQueryTimer(0);
+      timer = setInterval(() => {
+        setQueryTimer(prev => prev + 0.1);
+      }, 100);
+    }
+    return () => clearInterval(timer);
+  }, [isQuerying]);
 
   useEffect(() => {
     fetchDocuments();
@@ -62,6 +75,12 @@ export default function App() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.size > 2 * 1024 * 1024) {
+      alert("File is too large. Please upload a file smaller than 2MB.");
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
 
     const formData = new FormData();
     formData.append('file', file);
@@ -97,15 +116,13 @@ export default function App() {
   };
 
   const handleDeleteDoc = async (docId: string) => {
-    if (!confirm('Are you sure you want to delete this document and its embeddings?')) return;
-    
     try {
+      setDocuments(prev => prev.filter(doc => doc.id !== docId));
       const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
-      if (res.ok) {
-        await fetchDocuments();
-      }
+      await fetchDocuments();
     } catch (error) {
       console.error('Delete error', error);
+      await fetchDocuments();
     }
   };
 
@@ -118,6 +135,7 @@ export default function App() {
     setMessages(prev => [...prev, { role: 'user', content: currentQuery }]);
     
     setIsQuerying(true);
+    const startTime = performance.now();
     try {
       const res = await fetch('/api/query', {
         method: 'POST',
@@ -126,6 +144,8 @@ export default function App() {
       });
       
       const data = await res.json();
+      const endTime = performance.now();
+      const processingTime = (endTime - startTime) / 1000;
       
       if (data.error) {
         setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${data.error}` }]);
@@ -133,7 +153,8 @@ export default function App() {
         setMessages(prev => [...prev, { 
           role: 'assistant', 
           content: data.answer,
-          sources: data.sources 
+          sources: data.sources,
+          processingTime
         }]);
       }
     } catch (error) {
@@ -184,7 +205,7 @@ export default function App() {
               accept=".txt,.md,.csv" 
               className="hidden" 
             />
-            <p className="text-[11px] text-zinc-400 mt-3 text-center">Supports plain text files (.txt, .md, .csv)</p>
+            <p className="text-[11px] text-zinc-400 mt-3 text-center">Supports plain text files (.txt, .md, .csv) • Max 2MB</p>
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
@@ -275,6 +296,12 @@ export default function App() {
                           <p key={j} className={j > 0 ? 'mt-2' : ''}>{line}</p>
                         ))}
                       </div>
+                      {msg.processingTime && (
+                        <div className="mt-3 pt-3 border-t border-zinc-200/50 text-[10px] text-zinc-400 font-medium flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          Generated in {msg.processingTime.toFixed(2)}s
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -285,7 +312,13 @@ export default function App() {
               <div className="flex justify-start max-w-3xl mx-auto">
                 <div className="bg-zinc-50 border border-zinc-200 text-zinc-800 rounded-3xl rounded-bl-sm px-6 py-4 shadow-sm flex items-center gap-3 animate-pulse">
                   <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
-                  <span className="text-sm font-medium text-zinc-500">Searching documents and generating response...</span>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium text-zinc-500">Searching documents and generating response...</span>
+                    <span className="text-[11px] text-zinc-400 font-medium flex items-center gap-1 mt-0.5">
+                      <Clock className="w-3 h-3" />
+                      {queryTimer.toFixed(1)}s elapsed
+                    </span>
+                  </div>
                 </div>
               </div>
             )}

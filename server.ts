@@ -13,7 +13,10 @@ const PORT = 3000;
 
 app.use(express.json());
 
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ 
+  dest: 'uploads/',
+  limits: { fileSize: 2 * 1024 * 1024 } // 2MB limit
+});
 const vectorStore = new VectorStore('./vector_db.json');
 
 // Ensure uploads dir exists
